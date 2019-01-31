@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.32
+
+- Update keepalived to v2.0.11
+- [#79](https://github.com/aledbf/kube-keepalived-vip/pull/79) add notify script via environment variable
+
+## 0.31
+
+- [#71](https://github.com/aledbf/kube-keepalived-vip/pull/71) Add health check
+- [#75](https://github.com/aledbf/kube-keepalived-vip/pull/75) Fix race condition crash on startup
+
+## 0.30
+
+- Update keepalived to v2.0.10
+- [#68](https://github.com/aledbf/kube-keepalived-vip/pull/68) Cleanup VIPs on startup
+- [#69](https://github.com/aledbf/kube-keepalived-vip/pull/69) Start kube-keepalived-vip via dumb-init
+
 ## 0.29
 
 - Disable resync period

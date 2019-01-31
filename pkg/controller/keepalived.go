@@ -17,12 +17,16 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"text/template"
+	"time"
 
 	"github.com/golang/glog"
 
@@ -31,9 +35,12 @@ import (
 )
 
 const (
-	iptablesChain = "KUBE-KEEPALIVED-VIP"
-	keepalivedCfg = "/etc/keepalived/keepalived.conf"
-	haproxyCfg    = "/etc/haproxy/haproxy.cfg"
+	iptablesChain   = "KUBE-KEEPALIVED-VIP"
+	keepalivedCfg   = "/etc/keepalived/keepalived.conf"
+	haproxyCfg      = "/etc/haproxy/haproxy.cfg"
+	keepalivedPid   = "/var/run/keepalived.pid"
+	keepalivedState = "/var/run/keepalived.state"
+	vrrpPid         = "/var/run/vrrp.pid"
 )
 
 var (
@@ -57,6 +64,7 @@ type keepalived struct {
 	ipt            iptables.Interface
 	vrid           int
 	proxyMode      bool
+	notify         string
 }
 
 // WriteCfg creates a new keepalived configuration file.
@@ -76,7 +84,7 @@ func (k *keepalived) WriteCfg(svcs []vip) error {
 	conf["myIP"] = k.ip
 	conf["netmask"] = k.netmask
 	conf["svcs"] = svcs
-	conf["vips"] = getVIPs(svcs)
+	conf["vips"] = k.vips
 	conf["nodes"] = k.neighbors
 	conf["priority"] = k.priority
 	conf["useUnicast"] = k.useUnicast
@@ -84,6 +92,7 @@ func (k *keepalived) WriteCfg(svcs []vip) error {
 	conf["iface"] = k.iface
 	conf["proxyMode"] = k.proxyMode
 	conf["vipIsEmpty"] = len(k.vips) == 0
+	conf["notify"] = k.notify
 
 	if glog.V(2) {
 		b, _ := json.Marshal(conf)
@@ -136,8 +145,7 @@ func (k *keepalived) Start() {
 		"--dont-fork",
 		"--log-console",
 		"--release-vips",
-		"--log-detail",
-		"--pid", "/keepalived.pid")
+		"--log-detail")
 
 	k.cmd.Stdout = os.Stdout
 	k.cmd.Stderr = os.Stderr
@@ -149,22 +157,19 @@ func (k *keepalived) Start() {
 
 	k.started = true
 
-	if err := k.cmd.Start(); err != nil {
-		glog.Errorf("keepalived error: %v", err)
-	}
-
-	if err := k.cmd.Wait(); err != nil {
-		glog.Fatalf("keepalived error: %v", err)
+	if err := k.cmd.Run(); err != nil {
+		glog.Fatalf("Error starting keepalived: %v", err)
 	}
 }
 
 // Reload sends SIGHUP to keepalived to reload the configuration.
 func (k *keepalived) Reload() error {
-	if !k.started {
-		// TODO: add a warning indicating that keepalived is not started?
-		return nil
+	glog.Info("Waiting for keepalived to start")
+	for !k.IsRunning() {
+		time.Sleep(time.Second)
 	}
 
+	k.Cleanup()
 	glog.Info("reloading keepalived")
 	err := syscall.Kill(k.cmd.Process.Pid, syscall.SIGHUP)
 	if err != nil {
@@ -174,8 +179,75 @@ func (k *keepalived) Reload() error {
 	return nil
 }
 
-// Stop stop keepalived process
-func (k *keepalived) Stop() {
+// Whether keepalived process is currently running
+func (k *keepalived) IsRunning() bool {
+	if !k.started {
+		glog.Error("keepalived not started")
+		return false
+	}
+
+	if _, err := os.Stat(keepalivedPid); os.IsNotExist(err) {
+		glog.Error("Missing keepalived.pid")
+		return false
+	}
+
+	return true
+}
+
+// Whether keepalived child process is currently running and VIPs are assigned
+func (k *keepalived) Healthy() error {
+	if !k.IsRunning() {
+		return fmt.Errorf("keepalived is not running")
+	}
+
+	if _, err := os.Stat(vrrpPid); os.IsNotExist(err) {
+		return fmt.Errorf("VRRP child process not running")
+	}
+
+	b, err := ioutil.ReadFile(keepalivedState)
+	if err != nil {
+		return err
+	}
+
+	master := false
+	state := strings.TrimSpace(string(b))
+	if strings.Contains(state, "MASTER") {
+		master = true
+	}
+
+	var out bytes.Buffer
+	cmd := exec.Command("ip", "-brief", "address", "show", k.iface, "up")
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = &out
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+		Pgid:    0,
+	}
+
+	err = cmd.Run()
+	if err != nil {
+		return err
+	}
+
+	ips := out.String()
+	glog.V(3).Infof("Status of %s interface: %s", state, ips)
+
+	for _, vip := range k.vips {
+		containsVip := strings.Contains(ips, fmt.Sprintf(" %s/32 ", vip))
+
+		if master && !containsVip {
+			return fmt.Errorf("Missing VIP %s on %s", vip, state)
+		} else if !master && containsVip {
+			return fmt.Errorf("%s should not contain VIP %s", state, vip)
+		}
+	}
+
+	// All checks successful
+        return nil
+}
+
+func (k *keepalived) Cleanup() {
+	glog.Infof("Cleanup: %s", k.vips)
 	for _, vip := range k.vips {
 		k.removeVIP(vip)
 	}
@@ -184,20 +256,24 @@ func (k *keepalived) Stop() {
 	if err != nil {
 		glog.V(2).Infof("unexpected error flushing iptables chain %v: %v", err, iptablesChain)
 	}
+}
 
-	err = syscall.Kill(k.cmd.Process.Pid, syscall.SIGTERM)
+// Stop stop keepalived process
+func (k *keepalived) Stop() {
+	k.Cleanup()
+
+	err := syscall.Kill(k.cmd.Process.Pid, syscall.SIGTERM)
 	if err != nil {
 		glog.Errorf("error stopping keepalived: %v", err)
 	}
 }
 
-func (k *keepalived) removeVIP(vip string) error {
+func (k *keepalived) removeVIP(vip string) {
 	glog.Infof("removing configured VIP %v", vip)
 	out, err := k8sexec.New().Command("ip", "addr", "del", vip+"/32", "dev", k.iface).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("error reloading keepalived: %v\n%s", err, out)
+		glog.V(2).Infof("Error removing VIP %s: %v\n%s", vip, err, out)
 	}
-	return nil
 }
 
 func (k *keepalived) loadTemplates() error {

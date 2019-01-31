@@ -29,6 +29,8 @@ vrrp_instance vips {
     {{ $iface }}
   }
 
+  {{ if .notify }} notify {{ .notify }} {{ end }}
+
   {{ if .useUnicast }}
   unicast_src_ip {{ .myIP }}
   unicast_peer { {{ range .nodes }}
@@ -39,6 +41,8 @@ vrrp_instance vips {
   virtual_ipaddress { {{ range .vips }}
     {{ . }}{{ end }}
   }
+
+  notify /keepalived-check.sh
 
 {{ if .proxyMode }}
   # In proxy mode there is no need to create virtual servers
@@ -51,8 +55,8 @@ vrrp_instance vips {
 
 {{ if not .proxyMode }}
 {{ range $i, $svc := .svcs }}
-{{ if eq $svc.LVSMethod "VIP" }} 
-# VIP Service with no pods: {{ $svc.IP }} 
+{{ if eq $svc.LVSMethod "VIP" }}
+# VIP Service with no pods: {{ $svc.IP }}
 {{ else }}
 # Service: {{ $svc.Name }}
 virtual_server {{ $svc.IP }} {{ $svc.Port }} {

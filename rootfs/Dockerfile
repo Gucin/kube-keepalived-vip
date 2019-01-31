@@ -23,7 +23,7 @@ RUN clean-install \
   libxtables12 \
   libnfnetlink0 \
   libiptcdata0 \
-  libipset3 \
+  libipset11 \
   libipset-dev \
   libsnmp30 \
   kmod \
@@ -31,7 +31,9 @@ RUN clean-install \
   iproute2 \
   curl \
   ipvsadm \
-  bash
+  bash \
+  jq \
+  dumb-init
 
 ADD keepalived.tar.gz /
 
@@ -41,4 +43,4 @@ RUN mkdir -p /etc/keepalived && \
 
 COPY . /
 
-ENTRYPOINT ["/kube-keepalived-vip"]
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/kube-keepalived-vip"]

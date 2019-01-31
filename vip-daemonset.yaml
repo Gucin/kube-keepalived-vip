@@ -10,9 +10,15 @@ spec:
     spec:
       hostNetwork: true
       containers:
-        - image: aledbf/kube-keepalived-vip:0.29
+        - image: aledbf/kube-keepalived-vip:0.32
           name: kube-keepalived-vip
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            timeoutSeconds: 3
           securityContext:
             privileged: true
           volumeMounts:
